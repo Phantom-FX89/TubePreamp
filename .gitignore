@@ -36,3 +36,6 @@ Temporary Items
 
 # Agent
 .agent/task.md
+
+# Keep the documented example env file tracked
+!.env.example
