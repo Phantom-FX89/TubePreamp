@@ -36,3 +36,14 @@ Temporary Items
 
 # Agent
 .agent/task.md
+
+# Environment (keep the documented example tracked)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# CMake / CLion out-of-source builds
+cmake-build-*/

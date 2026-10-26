@@ -73,28 +73,12 @@ designed using the classic RBJ (Robert Bristow-Johnson) cookbook formulas.
 # 1. Navigate to the TubePreamp folder
 cd /path/to/TubePreamp
 
-# 2. Initialize git (if this isn't already a git repo)
-git init
-
-# 3. Add JUCE as a git submodule
-git submodule add https://github.com/juce-framework/JUCE.git JUCE
+# 2. Initialize the JUCE submodule
 git submodule update --init --recursive
 
-# 4. Make the install script executable
+# 3. Make the install script executable
 chmod +x install.sh
 ```
-
-**Before building**, open `CMakeLists.txt` and change these four lines to your own values:
-
-```cmake
-COMPANY_NAME                "YourStudio"           # ← Your name or company
-PLUGIN_MANUFACTURER_CODE    "Ystd"                 # ← Unique 4-char code (YOU pick this)
-PLUGIN_CODE                 "Tpre"                 # ← Unique 4-char code (YOU pick this)
-BUNDLE_ID                   "com.yourstudio.tubepreamp"  # ← Your reverse domain
-```
-
-> **Why unique codes?** If two plugins share the same PLUGIN_CODE, the DAW may load
-> the wrong one. Choose codes that are very unlikely to conflict.
 
 ---
 
@@ -201,4 +185,4 @@ When you're ready to expand the plugin, here are good next moves:
    saturation is generating. Great for understanding the DSP and great marketing.
 
 5. **AAX format** — Add AAX support for Pro Tools. Requires the Avid AAX SDK and
-   PACE anti-piracy signing. See the companion analysis document for details.
+   PACE anti-piracy signing.
