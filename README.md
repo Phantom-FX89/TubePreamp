@@ -1,204 +1,283 @@
-# Tube Preamp Plugin
+# Tube Preamp
 
-A tube preamp emulation plugin for macOS, targeting AU (Logic Pro) and VST3 (Ableton, Reaper, etc.).
+Stereo macOS insert effect (AU and VST3): a wide gain stage, a bipolar waveshaper, and an optional fixed three-band EQ.
 
----
+The window subtitle is "ANALOG CHARACTER EMULATOR". The DSP below is the whole product. Button names are labels on those EQ curves.
 
-## What It Does
+## Behavior
 
-This plugin emulates the sonic character of a tube microphone preamplifier, with three
-switchable console EQ curves based on the SSL 4000, Neve 1073, and Focusrite ISA preamps.
-
-**Signal flow:**
+Path inside `processBlock`:
 
 ```
-Input → Mic Level Gain → Tube Saturation (Drive) → Tone EQ → Output
+input → mic gain → drive → tone EQ (or bypass) → output
 ```
 
----
+Default buses are stereo in and stereo out. There is no MIDI, no sidechain bus, and no tail. `processBlock` writes the first two channels it is given and leaves any further channels alone. The processor does not override `isBusesLayoutSupported`.
 
-## Controls
+One program slot. `getProgramName` returns an empty string. There is no preset browser.
 
-### DRIVE (bipolar knob — center = clean)
+The host stores the three parameters as an `AudioProcessorValueTreeState` XML blob (`TubePreampState`). On load, state is applied only when that tag matches.
 
-| Position | Sound | What's happening in the code |
-|----------|-------|------------------------------|
-| Left (−1.0) | Subtle warmth | Asymmetric x² waveshaping → trace 2nd harmonic |
-| Center (0.0) | Clean, transparent | Signal passes through unchanged |
-| Right (+1.0) | Heavy tube push | `tanh(k·x)/tanh(k)` — soft-clips peaks, generates even harmonics |
+| Host parameter | ID | Range | Default | Smoothing |
+| --- | --- | --- | --- | --- |
+| Mic Gain | `micGain` | -20 dB to +60 dB, 0.1 dB steps | 0 dB | 20 ms |
+| Drive | `drive` | -1 to +1, 0.01 steps | 0 | 20 ms |
+| Tone Mode | `toneMode` | 0 off, 1 SSL 4K, 2 Neve 1073, 3 Focusrite | 0 (off) | none (read once per block) |
 
-**Double-click to reset to center (clean).**
+Gain is converted with `juce::Decibels::decibelsToGain` before it multiplies the sample. Tone mode is not smoothed, so a switch can click. The editor polls `toneMode` at 10 Hz so the buttons follow host automation.
 
-The positive side uses the hyperbolic tangent function `tanh()`, which is mathematically
-ideal for tube saturation modeling: it's linear at low levels and soft-clips smoothly at
-high levels, generating the even harmonics (2nd, 4th) that give tubes their warmth.
+Samples are not clipped after the chain.
 
-### MIC LEVEL (gain knob)
+### Mic gain
 
-Range: −20 dB to +60 dB. Unity (0 dB) means no level change.
-- Use negative values to attenuate hot line-level signals
-- Use high positive values to boost quiet microphone signals
+Unity is 0 dB. Negative values pad a hot signal down. Positive values boost it, up to +60 dB (a linear gain of 1000). Double-click the knob to return to 0 dB. The value box shows one decimal and a `dB` suffix, and it accepts typed values.
 
-**Double-click to reset to 0 dB (unity gain).**
+### Drive
 
-### Console Character Buttons
+Absolute drive below 0.001 leaves the sample unchanged. Double-click returns to 0. The value box shows two decimals. The GUI paints "CLEAN" on the left of the knob and "HOT" on the right. The passthrough is the center.
 
-Three mutually exclusive tone-shaping modes. **Click the active button again to turn it off.**
+Positive drive (`drive > 0`):
 
-| Button | Frequency Signature | Character |
-|--------|---------------------|-----------|
-| **SSL 4K** | +1.5 dB @80Hz, +2.0 dB @3.5kHz, +1.5 dB @12kHz | Punchy, forward, modern |
-| **NEVE 1073** | +3.0 dB @60Hz, +2.5 dB @3.2kHz, +1.0 dB @10kHz | Warm, rich, vintage |
-| **FOCUSRITE** | +1.5 dB @80Hz, +1.5 dB @5kHz, +2.5 dB @16kHz | Clean, extended air |
+```
+k = 1 + drive * 11          // about 1 at just above 0, 12 at +1
+y = tanh(k * x) / tanh(k)
+```
 
-Each mode uses three biquad IIR filters in series (low shelf → peak → high shelf),
-designed using the classic RBJ (Robert Bristow-Johnson) cookbook formulas.
+`tanh` is odd, so this path produces odd-order harmonics. Dividing by `tanh(k)` holds a full-scale input (±1) at full scale. Larger inputs, including a hot mic-gain stage, squash toward ±1. There is no oversampling, so those harmonics can alias.
 
----
+Negative drive (`drive < 0`):
 
-## Prerequisites
+```
+amount = (-drive) * 0.15    // 0.15 at drive = -1
+sign   = +1 if x > 0 else -1
+y      = x + amount * x * x * sign
+```
 
-| Tool | Version | Install |
-|------|---------|---------|
-| macOS | 11.0+ (Big Sur) | — |
-| Xcode | 14.0+ | Mac App Store |
-| CMake | 3.22+ | `brew install cmake` |
-| JUCE | 7.0+ | Git submodule (see below) |
+That expression is also odd (`f(-x) = -f(x)`), so a sine yields odd-order harmonics. It has no ceiling. A full-scale sample at +60 dB is a linear gain of 1000; at drive = -1 that sample becomes about 151000. Comments in `Source/PluginProcessor.cpp` and `.agent/ARCHITECTURE.md` call this path even-harmonic "Class A" warmth. The formula above is what runs.
 
----
+### Tone EQ
 
-## First-Time Setup
+Three buttons: **SSL 4K**, **NEVE 1073**, **FOCUSRITE**. They select `toneMode` 1, 2, or 3. Click the active button again and the mode returns to 0 (filters skipped).
+
+Each mode is three RBJ biquads in series (low shelf, peak, high shelf), from `juce::dsp::IIR::Coefficients`, stereo, coefficients set in `prepareToPlay` from the sample rate. Gains are not automatable. The repo does not include the measurements or a circuit model behind the names.
+
+| Mode | Low shelf | Peak | High shelf |
+| --- | --- | --- | --- |
+| SSL 4K | +1.5 dB at 80 Hz, Q 0.71 | +2.0 dB at 3.5 kHz, Q 0.80 | +1.5 dB at 12 kHz, Q 0.71 |
+| Neve 1073 | +3.0 dB at 60 Hz, Q 0.71 | +2.5 dB at 3.2 kHz, Q 0.70 | +1.0 dB at 10 kHz, Q 0.71 |
+| Focusrite | +1.5 dB at 80 Hz, Q 0.71 | +1.5 dB at 5 kHz, Q 1.20 | +2.5 dB at 16 kHz, Q 0.71 |
+
+### Editor
+
+`Source/PluginEditor.cpp` opens a fixed 440×280 window (`setResizable(false, false)`). Background `#1A1A1A`, accent `#E8A230`. Knobs are `RotaryVerticalDrag`, bound with `SliderAttachment`.
+
+### What this build does not contain
+
+No output trim, no oversampling, no spectrum, no custom knob graphics, no factory presets, no MIDI, no standalone app, no VST2, no AAX. `CMakeLists.txt` mentions AAX only in a comment. `FORMATS` is `AU VST3`.
+
+## Requirements
+
+Build and install are macOS-only. `install.sh` uses `xcode-select`, `sysctl`, `lipo`, and `~/Library`.
+
+| Requirement | Where it is set |
+| --- | --- |
+| CMake 3.22 or newer | `cmake_minimum_required` in `CMakeLists.txt` |
+| C++17 | `CMAKE_CXX_STANDARD` |
+| macOS deployment target 11.0 | `CMAKE_OSX_DEPLOYMENT_TARGET` |
+| Universal binary `arm64` and `x86_64` | `CMAKE_OSX_ARCHITECTURES` |
+| A selected developer directory | `install.sh` requires `xcode-select -p` to succeed. The script comment asks for full Xcode. The check itself also passes for the Command Line Tools. |
+| Git | JUCE is a submodule |
+
+CMake is not bundled. The script's error text suggests `brew install cmake`. Any `cmake` 3.22+ on `PATH` satisfies the check. The script does not check an Xcode version.
+
+## Setup
+
+`.gitmodules` already points `JUCE` at `https://github.com/juce-framework/JUCE.git`, pinned to commit [`501c07674e1ad693085a7e7c398f205c2677f5da`](https://github.com/juce-framework/JUCE/commit/501c07674e1ad693085a7e7c398f205c2677f5da) (JUCE module version 8.0.12 in `juce_core`).
+
+From a clone:
 
 ```bash
-# 1. Navigate to the TubePreamp folder
-cd /path/to/TubePreamp
-
-# 2. Initialize git (if this isn't already a git repo)
-git init
-
-# 3. Add JUCE as a git submodule
-git submodule add https://github.com/juce-framework/JUCE.git JUCE
 git submodule update --init --recursive
+```
 
-# 4. Make the install script executable
+Do not run `git init` or `git submodule add` for JUCE. The submodule is already recorded.
+
+`install.sh` is executable in git (`100755`). If a checkout drops that bit:
+
+```bash
 chmod +x install.sh
 ```
 
-**Before building**, open `CMakeLists.txt` and change these four lines to your own values:
+`install.sh` treats any `JUCE/` directory as success (`[ -d JUCE ]`). An empty directory passes, and CMake then fails in `add_subdirectory(JUCE)` because `JUCE/CMakeLists.txt` is missing. Initialize the submodule before configuring.
 
-```cmake
-COMPANY_NAME                "YourStudio"           # ← Your name or company
-PLUGIN_MANUFACTURER_CODE    "Ystd"                 # ← Unique 4-char code (YOU pick this)
-PLUGIN_CODE                 "Tpre"                 # ← Unique 4-char code (YOU pick this)
-BUNDLE_ID                   "com.yourstudio.tubepreamp"  # ← Your reverse domain
-```
+If the `JUCE/` directory is actually absent, the script exits and prints `git init` plus `git submodule add`. That message does not match this repo. Use the submodule command above.
 
-> **Why unique codes?** If two plugins share the same PLUGIN_CODE, the DAW may load
-> the wrong one. Choose codes that are very unlikely to conflict.
+Plugin identity is already set. These values are the AU/VST3 identity hosts store. Change them only to ship a different plugin.
 
----
+| Field | Value |
+| --- | --- |
+| `COMPANY_NAME` | Phantom House Audio |
+| `PLUGIN_MANUFACTURER_CODE` | `P747` |
+| `PLUGIN_CODE` | `T740` |
+| `BUNDLE_ID` | `com.phantomhouseaudio.tubepreamp` |
+| `PRODUCT_NAME` | Tube Preamp |
+| Version | 1.0.0 |
+| Formats | AU, VST3 |
+| VST3 categories | `Fx`, `Dynamics` |
 
-## Build & Install
+`Dynamics` is only the VST3 category string. The processor is not a compressor or a gate.
+
+## Build and install
+
+Run from the repository root on a Mac:
 
 ```bash
 ./install.sh
 ```
 
-That's it. The script will:
-1. ✅ Validate your environment (Xcode, CMake, JUCE)
-2. 🔧 Configure the CMake/Xcode build system
-3. ⚙️  Build the Universal Binary (arm64 + x86_64)
-4. 📦 Install AU to `~/Library/Audio/Plug-Ins/Components/`
-5. 📦 Install VST3 to `~/Library/Audio/Plug-Ins/VST3/`
-6. 🔄 Refresh the audio component registry
+What the script does:
 
-**For a clean rebuild** (if something seems wrong):
+1. Confirms `CMakeLists.txt`, `xcode-select -p`, `cmake`, and a `JUCE/` directory.
+2. If `build/` is missing, configures with the same architecture and deployment flags as `CMakeLists.txt`:
+
+   ```bash
+   cmake -B build \
+     -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+     -DCMAKE_OSX_DEPLOYMENT_TARGET="11.0"
+   ```
+
+   It does not pass `-G Xcode`. CMake uses its default generator (Unix Makefiles, unless `CMAKE_GENERATOR` is already set).
+3. If `build/` already exists, configure is skipped. `./install.sh --clean` deletes `build/` and configures again. `--clean` is the only flag.
+4. Builds Release, parallel across `sysctl -n hw.ncpu`. `set -e` stops the script on the first failing command.
+5. Copies `Tube Preamp.component` to `~/Library/Audio/Plug-Ins/Components/`.
+6. Copies `Tube Preamp.vst3` to `~/Library/Audio/Plug-Ins/VST3/`.
+7. Runs `killall -9 AudioComponentRegistrar` (failures ignored) so hosts drop the cached AU scan.
+
+The script does not create those Library folders. If `cp` fails because a folder is missing:
+
 ```bash
-./install.sh --clean
+mkdir -p ~/Library/Audio/Plug-Ins/Components ~/Library/Audio/Plug-Ins/VST3
 ```
 
----
+Default-generator artifacts:
 
-## Project Structure
+- `build/TubePreamp_artefacts/AU/Tube Preamp.component`
+- `build/TubePreamp_artefacts/VST3/Tube Preamp.vst3`
+
+If the Xcode generator was used, the script also looks under `build/TubePreamp_artefacts/Release/`. When the VST3 binary exists, it prints `lipo -info`. It does not fail the install when the binary is single-architecture.
+
+Configure and build without installing:
+
+```bash
+git submodule update --init --recursive
+cmake -B build \
+  -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET="11.0"
+cmake --build build --config Release --parallel
+```
+
+Linked JUCE modules: `juce_audio_utils`, `juce_audio_processors`, `juce_dsp`, `juce_gui_basics`, `juce_gui_extra`, `juce_core`. Public flags: `juce_recommended_config_flags`, `juce_recommended_lto_flags`, `juce_recommended_warning_flags`.
+
+Compile definitions: `JUCE_WEB_BROWSER=0`, `JUCE_USE_CURL=0`, `JUCE_VST3_CAN_REPLACE_VST2=0`, `JUCE_DISPLAY_SPLASH_SCREEN=0`. The splash flag is ignored by this JUCE pin; see License.
+
+After a successful install, the script prints this rescan list:
+
+- Logic Pro: quit and relaunch (AU scan on launch).
+- Ableton Live: Preferences → Plug-Ins → Rescan.
+- Reaper: Options → Preferences → VST → Rescan.
+- Studio One: Studio One menu → Options → Locations → Scan.
+
+## Configuration
+
+`Source/` and `install.sh` do not read environment variables, a dotenv file, or any other config file. There is no `.env.example` in the tree. Do not commit secrets; nothing in this repo needs one.
+
+`AAX_SDK_PATH` appears in a comment in `CMakeLists.txt`. No CMake or shell code reads it.
+
+`.gitignore` on `develop` ignores macOS Finder files, `/build/`, `/JuceLibraryCode/`, Xcode projects and user files (`*.xcode*`, `*.xcodeproj`, `*.xcworkspace`, `*.user`), `*.bak`, `*.old`, and `.agent/task.md`.
+
+[Hygiene PR #2](https://github.com/Phantom-FX89/TubePreamp/pull/2) adds `.env`, `.env.*` (with `!.env.example`), `*.log`, and `cmake-build-*/`. Those lines are not on `develop` until that PR merges. This change does not edit `.gitignore`.
+
+## Project structure
+
+Checked against the tree. There is no `docs/` directory, no `tests/` directory, no `.github/` workflow, no `LICENSE`, and no `.env.example`. `JUCE/` is empty until the submodule is initialized.
 
 ```
-TubePreamp/
-├── CMakeLists.txt              ← Build configuration
-├── install.sh                  ← Build & deploy script
-├── README.md                   ← This file
-├── JUCE/                       ← JUCE framework (git submodule)
+.
+├── .agent/                         internal notes; the build does not read these
+│   ├── ACCEPTANCE.md
+│   ├── ARCHITECTURE.md
+│   ├── MISSION.md
+│   ├── NOTES.md
+│   ├── RUNBOOK.md
+│   └── workflows/
+│       ├── analyze.md
+│       ├── build.md
+│       ├── credit-saver.md
+│       ├── design.md
+│       ├── fix.md
+│       ├── global-workflows.md
+│       ├── kickstart.md
+│       ├── ops.md
+│       ├── refactor.md
+│       ├── ship.md
+│       ├── spec.md
+│       ├── test-me.md
+│       ├── test.md
+│       └── universal.md
+├── .gitignore
+├── .gitmodules                     JUCE → https://github.com/juce-framework/JUCE.git
+├── CMakeLists.txt
+├── install.sh
+├── README.md
+├── JUCE/                           submodule, commit 501c076
 └── Source/
-    ├── PluginProcessor.h       ← DSP class declaration
-    ├── PluginProcessor.cpp     ← All audio processing (saturation, EQ, gain)
-    ├── PluginEditor.h          ← GUI class declaration
-    └── PluginEditor.cpp        ← GUI drawing and control logic
+    ├── PluginEditor.cpp
+    ├── PluginEditor.h
+    ├── PluginProcessor.cpp
+    └── PluginProcessor.h
 ```
 
----
+`.agent/RUNBOOK.md` and `.agent/NOTES.md` are empty templates. `.agent/ACCEPTANCE.md` is an unchecked manual checklist.
 
-## DSP Architecture Reference
+## Usage
 
-### How the Tube Saturation Works
+1. Initialize the submodule and run `./install.sh` on a Mac (see above).
+2. Rescan plugins in the host.
+3. Insert **Tube Preamp** on a track. AU hosts see manufacturer `P747`, subtype `T740`, type `aufx`. VST3 hosts see "Tube Preamp" from Phantom House Audio.
+4. Set mic gain for level, drive for the waveshaper, and one tone button or none.
 
-The drive algorithm uses `tanh()` (hyperbolic tangent), the mathematically
-ideal soft-clipper for tube modeling:
+Drive in the dead zone (`|drive| < 0.001`) returns the sample unchanged. 0 dB gain is unity. A tone button adds that mode's fixed curve. High mic gain with positive drive squashes toward full scale. High mic gain with negative drive is unbounded.
 
+Parameter moves on `micGain` and `drive` are recorded as host automation. `toneMode` is an integer parameter; the buttons record a gesture via `beginChangeGesture` / `endChangeGesture`. Reload the DAW session to restore the XML state.
+
+## Testing
+
+This repository has no test sources, no CTest target, and no GitHub Actions workflow. There is no CI badge for that reason.
+
+The build check that exists is a Mac run of `./install.sh`.
+
+Optional Audio Unit validation after install, using the type and codes from `CMakeLists.txt` and JUCE's effect mapping (`kAudioUnitType_Effect` → `aufx`):
+
+```bash
+auval -v aufx T740 P747
 ```
-y = tanh(k · x) / tanh(k)
 
-where:
-  x = input sample (−1.0 to +1.0)
-  k = drive amount (scales from 1.0 to 12.0 as drive goes 0 → 1)
-  tanh(k) = normalization factor (keeps output within ±1.0)
-```
+`.agent/ACCEPTANCE.md` lists that `auval` check, a DAW load, and the install paths. Nothing in the repo runs the list.
 
-At low levels, `tanh(x) ≈ x` (linear — no distortion).
-At high levels, `tanh(x) → ±1` (soft peak compression).
-The bend in the curve introduces harmonic content. Because `tanh` is
-an odd function with a smooth shape, it generates *even harmonics* when
-combined with the slight asymmetry of real tube circuits — these are musically
-consonant (octaves, fifths) and sound "warm."
+## Contributing
 
-### How the Biquad EQ Filters Work
+Pull requests target `develop`.
 
-Each tone mode uses three second-order IIR (biquad) filters in series.
-A biquad uses only 5 multiply-add operations per sample — very efficient.
+Keep `P747` / `T740` stable unless the plugin identity change is the point of the change. Update JUCE by changing the submodule pin, not by copying the framework into the tree. `./install.sh` is the macOS build path; `CMakeLists.txt` is the source of architectures, formats, and deployment target.
 
-The filter equation:
-```
-y[n] = b0·x[n] + b1·x[n−1] + b2·x[n−2]
-                − a1·y[n−1] − a2·y[n−2]
-```
-Where `b0,b1,b2,a1,a2` are the coefficients (computed from frequency, gain, Q).
-`x[n−1], x[n−2]` are the previous two input samples.
-`y[n−1], y[n−2]` are the previous two output samples.
-This feedback ("IIR") creates the resonant shelf/peak shapes.
+`.agent/` is workflow notes. The processor is the spec when those notes disagree with it.
 
-### Parameter Smoothing (No Zipper Noise)
+Licensing is an owner decision. Do not add or rewrite `LICENSE` in a feature PR. See below.
 
-When a knob changes value, applying the new value instantly to every sample
-causes a "zipper noise" — an audible click or stepping artifact. We prevent
-this using `juce::SmoothedValue`, which glides from the old value to the new
-value over 20 milliseconds (~882 samples at 44.1kHz).
+## License
 
----
+`develop` has no `LICENSE` file, and the source files have no license header. [PR #1](https://github.com/Phantom-FX89/TubePreamp/pull/1) proposes adding an MIT `LICENSE`. This README does not adopt that text. Merge of that PR is up to the owner.
 
-## Next Development Steps
+JUCE is not covered by that proposal. The pinned submodule is dual-licensed under the [AGPLv3](https://www.gnu.org/licenses/agpl-3.0.en.html) or the [JUCE 8 commercial licence](https://juce.com/legal/juce-8-licence/). Terms are in the submodule's `LICENSE.md` after init. This repository does not grant a JUCE licence.
 
-When you're ready to expand the plugin, here are good next moves:
-
-1. **Oversampling** — Add 2x or 4x oversampling to the saturation stage to reduce
-   aliasing artifacts at high drive settings. JUCE's `juce::dsp::Oversampling` class
-   handles this with just a few lines of code.
-
-2. **Custom knob graphics** — Override `drawRotarySlider()` in a custom LookAndFeel
-   to draw skeuomorphic knobs that look like real hardware.
-
-3. **Output gain** — Add a makeup gain knob after saturation (compensates for the
-   loudness increase that saturation causes at positive drive values).
-
-4. **Harmonic analyzer** — Add a spectrum display to show the harmonic content the
-   saturation is generating. Great for understanding the DSP and great marketing.
-
-5. **AAX format** — Add AAX support for Pro Tools. Requires the Avid AAX SDK and
-   PACE anti-piracy signing. See the companion analysis document for details.
+`CMakeLists.txt` sets `JUCE_DISPLAY_SPLASH_SCREEN=0`. The comment on that line says the splash requires a JUCE licence. On the pinned JUCE 8.0.12, `modules/juce_gui_basics/juce_gui_basics.cpp` does not draw a splash screen. If `JUCE_DISPLAY_SPLASH_SCREEN` is defined at all, that file emits a compiler warning that the flag is ignored. The define does not choose a licence.
